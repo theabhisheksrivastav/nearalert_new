@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -22,10 +23,19 @@ class _HomeScreenState extends State<HomeScreen> {
   final MapController _mapController = MapController();
   final TextEditingController _searchController = TextEditingController();
 
+  Timer? _proximityTimer;
+
   @override
   void initState() {
     super.initState();
     _notificationService.init();
+  }
+
+  @override
+  void dispose() {
+    _proximityTimer?.cancel();
+    _searchController.dispose();
+    super.dispose();
   }
 
   void _onMapTap(TapPosition tapPosition, LatLng position) {
@@ -33,6 +43,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _targetLatLng = position;
       _status = "Target set: (${position.latitude}, ${position.longitude})";
     });
+    _startProximityChecks();
   }
 
   Future<void> _checkProximity() async {
@@ -76,6 +87,7 @@ class _HomeScreenState extends State<HomeScreen> {
         _status =
             "Current location: (${pos.latitude.toStringAsFixed(5)}, ${pos.longitude.toStringAsFixed(5)})";
       });
+      _startProximityChecks();
     } else {
       setState(() => _status = "Current location not available");
     }
@@ -89,18 +101,78 @@ class _HomeScreenState extends State<HomeScreen> {
       List<Location> locations = await locationFromAddress(query);
       if (locations.isNotEmpty) {
         final loc = locations.first;
-        _mapController.move(LatLng(loc.latitude, loc.longitude), 16);
-        setState(() {
-          _targetLatLng = LatLng(loc.latitude, loc.longitude);
-          _status =
-              "Target set: (${loc.latitude.toStringAsFixed(5)}, ${loc.longitude.toStringAsFixed(5)})";
-        });
+
+        bool? setDestination = await showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text("Set as Destination?"),
+            content: Text(
+                "Do you want to set (${loc.latitude.toStringAsFixed(5)}, ${loc.longitude.toStringAsFixed(5)}) as your target?"),
+            actions: [
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, false),
+                  child: const Text("No")),
+              TextButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: const Text("Yes")),
+            ],
+          ),
+        );
+
+        if (setDestination ?? false) {
+          _mapController.move(LatLng(loc.latitude, loc.longitude), 16);
+          setState(() {
+            _targetLatLng = LatLng(loc.latitude, loc.longitude);
+            _status =
+                "Target set: (${loc.latitude.toStringAsFixed(5)}, ${loc.longitude.toStringAsFixed(5)})";
+          });
+          _startProximityChecks();
+        } else {
+          _mapController.move(LatLng(loc.latitude, loc.longitude), 16);
+        }
+
       } else {
         setState(() => _status = "Location not found");
       }
     } catch (e) {
       setState(() => _status = "Error finding location: $e");
     }
+  }
+
+  void _startProximityChecks() {
+    _proximityTimer?.cancel();
+
+    _proximityTimer = Timer.periodic(const Duration(seconds: 10), (timer) async {
+      if (_targetLatLng == null) return;
+
+      final pos = await _locationService.getCurrentLocation();
+      if (pos == null) return;
+
+      double distance = _locationService.calculateDistance(
+        pos.latitude, pos.longitude,
+        _targetLatLng!.latitude, _targetLatLng!.longitude,
+      );
+
+      // Determine next interval
+      int intervalSec;
+      if (distance > 10000) intervalSec = 180;
+      else if (distance > 5000) intervalSec = 100;
+      else if (distance > 2000) intervalSec = 30;
+      else intervalSec = 0; // Trigger alarm
+
+      setState(() => _status = "Distance: ${distance.toStringAsFixed(2)} m");
+
+      if (distance <= defaultThreshold) {
+        await _notificationService.showNotification(
+            "NearAlert", "You are within $defaultThreshold meters!");
+        // TODO: Play alarm sound
+        timer.cancel();
+      } else if (intervalSec > 0) {
+        timer.cancel();
+        _proximityTimer =
+            Timer.periodic(Duration(seconds: intervalSec), (_) => _startProximityChecks());
+      }
+    });
   }
 
   @override
